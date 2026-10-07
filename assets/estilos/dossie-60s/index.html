@@ -1,0 +1,755 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>grep FNDCT 60s</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;800;900&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;height:100%;background:#0d0c0b;overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0d0c0b}
+  canvas{display:block}
+  #play{position:fixed;inset:0;display:flex;flex-direction:column;gap:22px;align-items:center;justify-content:center;
+    background:rgba(13,12,11,.7);cursor:pointer;border:0;color:#efe9dd;font:600 16px 'Inter Tight',sans-serif;letter-spacing:.3em}
+  #play .btn{width:140px;height:140px;border-radius:50%;border:3px solid #E4002B;display:flex;align-items:center;justify-content:center}
+  #play .btn::after{content:"";margin-left:10px;border-style:solid;border-width:28px 0 28px 46px;border-color:transparent transparent transparent #E4002B}
+  #play.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1080" height="1920"></canvas></div>
+<button id="play" aria-label="Play"><div class="btn"></div><div>PLAY COM SOM</div></button>
+<script>
+(() => {
+'use strict';
+const W = 1080, H = 1920, DUR = 60, BPM = 100, B = 60 / BPM;
+const SERIF = "'Instrument Serif', Georgia, serif";
+const GROT = "'Inter Tight', system-ui, sans-serif";
+const MONO = "'JetBrains Mono', ui-monospace, Menlo, monospace";
+const C = { bg: '#0d0c0b', paper: '#ece6da', ink: '#16130f', grey: '#5d574d', red: '#E4002B', white: '#f4f0e8', dim: '#9a9386' };
+const AI_LABEL = 'Narração com voz sintética gerada por IA (Google Gemini)';
+
+// ---------- timeline (s) — picture follows VO (ffprobe durations in vo.md) ----------
+const T = {
+  type: .2, sweep: .9, stop: 1.55, zero: 1.8,
+  def: 6.0, defWords: 7.2, defEnd: 10.4, menc: 10.7,
+  tem: 13.2, r1: 13.4, r2: 14.9, r3: 17.3,
+  ponte: 21.0, lembrar: 23.4,
+  hist: 24.6, h1: 24.8, h2: 29.8, h3: 33.1,
+  sil: 35.6, silTxt: 36.3,
+  vir: 39.0, v1: 39.2, v2: 40.75, v3: 43.9, v4: 45.5, v5: 48.7,
+  rac: 50.6, racQ: 52.3, decide: 54.4,
+  end: 55.6, lula: 57.3,
+};
+// VO: [file, start, duration] (durations measured with ffprobe after trim + atempo)
+const VO = [
+  ['b1', 2.0, 3.611], ['b2', 6.2, 6.791], ['b3', 13.4, 7.207], ['b4', 21.2, 3.071], ['b5', 24.8, 10.250],
+  ['b6', 36.3, 2.323], ['b7', 39.2, 9.452], ['b8', 50.8, 4.596], ['b9', 56.0, 2.530],
+];
+const FREEZES = [[T.zero, .1], [T.v4, .1], [T.lula, .1]];   // 3-frame freeze on the big hits
+
+// ---------- deterministic helpers ----------
+const hash = i => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const eo = x => 1 - Math.pow(1 - x, 3);
+const eo5 = x => 1 - Math.pow(1 - x, 5);
+const eio = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const lerp = (a, b, x) => a + (b - a) * x;
+const punch = (t, at, amt = .14) => 1 + amt * (1 - eo(P(t, at + .1, at + .45))) * (t >= at ? 1 : 0);
+
+const cv = document.getElementById('c'), c = cv.getContext('2d');
+function resize() { const s = Math.min(innerWidth / W, innerHeight / H); cv.style.width = W * s + 'px'; cv.style.height = H * s + 'px'; }
+addEventListener('resize', resize); resize();
+
+// ---------- textures (seeded) ----------
+function makeNoise(size, fn) {
+  const o = document.createElement('canvas'); o.width = o.height = size; const x = o.getContext('2d');
+  const im = x.createImageData(size, size);
+  for (let i = 0; i < size * size; i++) { const [r, g, b, a] = fn(i, i % size, (i / size) | 0); im.data[i*4]=r; im.data[i*4+1]=g; im.data[i*4+2]=b; im.data[i*4+3]=a; }
+  x.putImageData(im, 0, 0); return o;
+}
+const paperTex = makeNoise(256, (i, x, y) => {
+  const n = hash(i) * 0.6 + hash(y * 3.1 + 7) * 0.25 + hash((x >> 3) + y * 91) * 0.15;
+  const v = 224 + (n - 0.5) * 18;
+  return [v + 14, v + 8, v - 4, 255];
+});
+const grainTex = makeNoise(256, i => { const v = hash(i + 9001) * 255; return [v, v, v, 12]; });
+let paperPat = null, grainPat = null;
+const pat = () => { if (!paperPat) { paperPat = c.createPattern(paperTex, 'repeat'); grainPat = c.createPattern(grainTex, 'repeat'); } };
+
+// ---------- drawing primitives ----------
+function txt(s, x, y, font, color, align = 'left', alpha = 1, base = 'alphabetic') {
+  if (alpha <= 0) return;
+  c.save(); c.globalAlpha *= alpha; c.font = font; c.fillStyle = color; c.textAlign = align; c.textBaseline = base; c.fillText(s, x, y); c.restore();
+}
+function wrapWords(s, font, maxW) {
+  c.font = font; const words = s.split(' '); const lines = []; let cur = '';
+  for (const w of words) { const t = cur ? cur + ' ' + w : w; if (c.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t; }
+  if (cur) lines.push(cur); return lines;
+}
+function wrap(s, x, y, font, color, maxW, lh, align = 'left', alpha = 1) {
+  const L = wrapWords(s, font, maxW); L.forEach((l, i) => txt(l, x, y + i * lh, font, color, align, alpha)); return L.length * lh;
+}
+function marker(x, y, w, h, p, seed, color = C.red, multiply = true, alpha = .9) {
+  if (p <= 0) return;
+  const ww = w * p; c.save(); if (multiply) c.globalCompositeOperation = 'multiply'; c.globalAlpha *= alpha; c.fillStyle = color; c.beginPath();
+  const n = 12; c.moveTo(x, y + h * 0.12);
+  for (let i = 1; i <= n; i++) c.lineTo(x + ww * i / n, y + h * 0.12 + (hash(seed + i) - .5) * h * .16);
+  for (let i = n; i >= 0; i--) c.lineTo(x + ww * i / n, y + h * 0.95 + (hash(seed + 50 + i) - .5) * h * .14);
+  c.closePath(); c.fill(); c.restore();
+}
+function paperRect(x, y, w, h, shadow = true) {
+  c.save();
+  if (shadow) { c.shadowColor = 'rgba(0,0,0,.55)'; c.shadowBlur = 40; c.shadowOffsetY = 18; }
+  c.fillStyle = C.paper; c.fillRect(x, y, w, h); c.shadowColor = 'transparent';
+  c.globalAlpha = .9; c.fillStyle = paperPat; c.fillRect(x, y, w, h); c.restore();
+}
+// card: paper at (cx,cy) rotated/scaled, draw(w,h) in local top-left coords
+function card(cx, cy, w, h, rot, s, alpha, draw) {
+  if (alpha <= 0) return;
+  c.save(); c.globalAlpha *= alpha; c.translate(cx, cy); c.rotate(rot); c.scale(s, s); c.translate(-w / 2, -h / 2);
+  paperRect(0, 0, w, h); draw(w, h); c.restore();
+}
+// stylized page with grey lines (no readable text)
+function page(cx, cy, w, h, rot, seed, shade = 0) {
+  c.save(); c.translate(cx, cy); c.rotate(rot);
+  paperRect(-w/2, -h/2, w, h);
+  const L = -w/2 + w * .11, R = w/2 - w * .11, lw = R - L;
+  let y = -h/2 + h * .09;
+  c.fillStyle = '#5d574d'; c.fillRect(L, y, lw * (0.35 + hash(seed + 1) * .25), h * .016); y += h * .045;
+  c.fillStyle = '#b8b1a4'; c.fillRect(L, y, lw * .22, h * .007); y += h * .05;
+  let k = 0;
+  while (y < h/2 - h * .1) {
+    const paraLen = 3 + Math.floor(hash(seed * 7 + k) * 6);
+    for (let j = 0; j < paraLen && y < h/2 - h * .1; j++, k++) {
+      const last = j === paraLen - 1;
+      const len = last ? 0.25 + hash(seed + k * 3.3) * 0.5 : 0.9 + hash(seed + k * 1.7) * 0.1;
+      c.fillStyle = '#aaa395'; c.fillRect(L, y, lw * len, h * .0065); y += h * .021;
+    }
+    y += h * .02;
+    if (hash(seed + k * 13) > .8) { c.fillStyle = '#6f685d'; c.fillRect(L, y, lw * .4, h * .01); y += h * .035; }
+  }
+  if (shade > 0) { c.fillStyle = `rgba(13,12,11,${shade})`; c.fillRect(-w/2, -h/2, w, h); }
+  c.restore();
+}
+function grain(t) { c.save(); const f = Math.floor(t * 24); c.translate(-hash(f) * 256, -hash(f + .5) * 256); c.fillStyle = grainPat; c.fillRect(0, 0, W + 256, H + 256); c.restore(); }
+function vignette(a = .5) {
+  const g = c.createRadialGradient(W/2, H/2, H * .25, W/2, H/2, H * .75);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(0,0,0,${a})`); c.fillStyle = g; c.fillRect(0, 0, W, H);
+}
+// mono evidence line (top of content zone, below the 140 px unsafe band)
+function evidence(s, a, color = C.dim, y = 205) { txt(s, 60, y, `500 36px ${MONO}`, color, 'left', a); }
+function shake(t, at, amt = 16, dur = .45) { const k = (1 - P(t, at, at + dur)) * amt * (t >= at ? 1 : 0); const f = Math.floor(t * 60); return [(hash(f) - .5) * k, (hash(f + 3) - .5) * k]; }
+
+// ---------- 1. HOOK 0 – 6.0 ----------
+function hook(t) {
+  const arrive = eo5(P(t, 0, .55));
+  const pw = 760, ph = 900, baseY = 1010;
+  const flips = [T.sweep + .3, T.sweep + .55];
+  const dimPages = .7 * eo(P(t, T.zero, T.zero + .4));
+  for (let i = 3; i >= 0; i--) {
+    let fx = 0, fr = 0, fy = 0;
+    if (i < 2) { const fp = eio(P(t, flips[i] - .2, flips[i] + .05)); fx = -fp * 1250; fr = -fp * .35; fy = -fp * 120; if (fp >= 1) continue; }
+    const depth = i - (t > flips[0] ? 1 : 0) - (t > flips[1] ? 1 : 0), d = Math.max(depth, 0);
+    const cx = W/2 + d * 20 + fx + (1 - arrive) * 60;
+    const cy = baseY + d * 24 + fy + (1 - arrive) * (900 + i * 120);
+    const rot = (hash(i + 3) - .5) * .05 + fr + d * .01;
+    page(cx, cy, pw, ph, rot, 10 + i * 17, Math.min(.85, d * .18 + dimPages));
+    if (depth === 0 && t >= T.sweep && t < T.stop) {
+      const segs = [T.sweep, flips[0] - .1, flips[1] - .1, T.stop];
+      const s = i === 0 ? 0 : i === 1 ? 1 : 2, sp = eio(P(t, segs[s], segs[s + 1]));
+      c.save(); c.translate(cx, cy); c.rotate(rot);
+      const by = -ph/2 + 80 + sp * (ph - 200);
+      c.fillStyle = 'rgba(228,0,43,.18)'; c.fillRect(-pw/2, by - 46, pw, 92);
+      c.fillStyle = C.red; c.fillRect(-pw/2, by - 2, pw, 4); c.restore();
+    }
+  }
+  // terminal: the exact command behind F1
+  const hIn = eo(P(t, 0, .35));
+  c.save(); c.globalAlpha = hIn;
+  c.fillStyle = 'rgba(22,19,15,.96)'; c.beginPath(); c.roundRect(60, 165, W - 120, 250, 16); c.fill();
+  c.fillStyle = C.red; c.fillRect(60, 165, 8, 250);
+  c.restore();
+  const q = '"fndct"'; const nTyped = t < T.type ? 0 : Math.min(q.length, Math.floor((t - T.type) / .085) + 1);
+  const F = `700 46px ${MONO}`;
+  c.font = F; const pre = '$ grep -ci ', pw0 = c.measureText(pre).width, typed = q.slice(0, nTyped), tw = c.measureText(typed).width;
+  txt(pre, 100, 235, F, '#efe9dd', 'left', hIn);
+  txt(typed, 100 + pw0, 235, F, '#ffb3c0', 'left', hIn);
+  txt('plano-flavio-2027-2030.txt', 100, 300, `500 46px ${MONO}`, '#c9c2b5', 'left', hIn);
+  if (t < T.zero && (Math.floor(t / .3) % 2 === 0 || t < T.sweep)) { c.fillStyle = C.red; c.globalAlpha = hIn; c.fillRect(104 + pw0 + tw, 197, 24, 48); c.globalAlpha = 1; }
+  if (t >= T.sweep && t < T.zero) txt('buscando' + '...'.slice(0, 1 + Math.floor(t / .12) % 3), 100, 375, `500 42px ${MONO}`, C.dim);
+  if (t >= T.zero) { txt('0', 100, 378, `700 56px ${MONO}`, C.red); txt('# nenhuma ocorrência', 150, 376, `500 42px ${MONO}`, C.dim); }
+
+  // THE ZERO — smaller, higher: glyph sits fully above the caption box
+  if (t >= T.zero) {
+    const zp = eo5(P(t, T.zero + .1, T.zero + .4));
+    const [sx, sy] = shake(t, T.zero + .1, 18);
+    const s = punch(t, T.zero, .16);
+    c.save(); c.translate(W/2 + sx, 930 + sy); c.scale(s, s);
+    c.globalAlpha = Math.max(.85, zp);
+    c.font = `italic 720px ${SERIF}`; c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+    c.fillStyle = C.red; c.fillText('0', 0, 250);
+    c.restore();
+    const cp = eo(P(t, T.zero + .5, T.zero + .9)), cy = 1300 + (1 - cp) * 30;
+    c.save(); c.globalAlpha = cp; c.fillStyle = 'rgba(13,12,11,.92)'; c.fillRect(60, cy - 100, W - 120, 250); c.restore();
+    txt('menções a “FNDCT”', W/2, cy - 4, `800 76px ${GROT}`, C.white, 'center', cp);
+    txt('no plano de governo do Flávio', W/2, cy + 86, `italic 66px ${SERIF}`, C.white, 'center', cp);
+    marker(W/2 - 330, cy + 104, 660 * eio(P(t, 4.35, 4.75)), 12, 1, 9, C.red, false, 1);
+  }
+}
+
+// ---------- 2. O QUE É 6.0 – 13.2 ----------
+const DEF = 'o fundo federal que financia pesquisa e inovação no Brasil.';
+function whatIs(t) {
+  const inP = eo5(P(t, T.def, T.def + .45));
+  const pw = 960, ph = 1290, rot = -0.012 + (1 - inP) * .05, cx = W/2, cy = 170 + ph/2 + (1 - inP) * 1300;
+  c.save(); c.translate(cx, cy); c.rotate(rot); c.translate(-pw/2, -ph/2);
+  paperRect(0, 0, pw, ph);
+  const L = 70;
+  txt('VERBETE', L, 90, `800 40px ${GROT}`, C.red);
+  txt('Lei 11.540/2007, art. 1º', pw - 70, 90, `500 32px ${MONO}`, C.grey, 'right');
+  c.fillStyle = C.ink; c.fillRect(L, 115, pw - 140, 4);
+  const hw = eo(P(t, T.def + .15, T.def + .55));
+  txt('FNDCT', L - 6, 290 + (1 - hw) * 30, `900 190px ${GROT}`, C.ink, 'left', hw);
+  txt('(o fundo da ciência)', L, 372, `italic 62px ${SERIF}`, C.grey, 'left', eo(P(t, T.def + .5, T.def + .9)));
+  const F = `italic 84px ${SERIF}`, lines = wrapWords(DEF, F, pw - 150), words = DEF.split(' ').length;
+  let wi = 0;
+  lines.forEach((ln, li) => {
+    let x = L; const y = 490 + li * 96;
+    for (const w of ln.split(' ')) {
+      const a = T.defWords + (T.defEnd - T.defWords) * wi / words, wp = eo(P(t, a, a + .18));
+      c.font = F; txt(w, x, y + (1 - wp) * 14, F, C.ink, 'left', wp);
+      x += c.measureText(w + ' ').width; wi++;
+    }
+  });
+  const yA = 490 + lines.length * 96;
+  txt('Gerido pela Finep (Secretaria-Executiva).', L, yA + 10, `600 46px ${GROT}`, C.grey, 'left', eo(P(t, 9.6, 10.0)));
+  c.fillStyle = C.ink; c.fillRect(L, yA + 60, (pw - 140) * eo(P(t, T.menc - .35, T.menc)), 3);
+  const np = eo(P(t, T.menc - .1, T.menc + .25));
+  txt('No plano dele:', L, yA + 160, `800 76px ${GROT}`, C.ink, 'left', np);
+  c.font = `italic 176px ${SERIF}`; const zw = c.measureText('0 menções.').width;
+  const s = punch(t, T.menc + .1, .06);
+  c.save(); c.translate(L, yA + 330); c.scale(s, s);
+  marker(-16, -150, zw + 36, 175, eio(P(t, T.menc + .1, T.menc + .5)), 77);
+  txt('0 menções.', 0, 0, `italic 176px ${SERIF}`, C.ink, 'left', eo(P(t, T.menc, T.menc + .3)));
+  c.restore();
+  c.restore();
+}
+
+// ---------- 3. O QUE TEM 13.2 – 21.0 ----------
+function oQueTem(t) {
+  c.fillStyle = '#1a1714'; c.fillRect(0, 0, W, H);
+  evidence('plano-flavio-2027-2030.txt  (84 págs.)', eo(P(t, T.tem, T.tem + .4)));
+  const rows = [
+    { at: T.r1, y: 440, h: 300, dir: -1, rot: -.018,
+      draw: (w, h, a) => {
+        txt('$ grep -n "Inteligência Artificial"', 50, 66, `500 34px ${MONO}`, C.grey);
+        txt('Capítulo de IA? Tem.', 50, 170, `900 80px ${GROT}`, C.ink);
+        txt('Estratégia Nacional de IA (p. 56) e mais (p. 25)', 50, 245, `italic 48px ${SERIF}`, C.grey);
+      } },
+    { at: T.r2, y: 800, h: 390, dir: 1, rot: .015,
+      draw: (w, h, a) => {
+        txt('$ grep "R\\$"  # valores em reais', 50, 66, `500 34px ${MONO}`, C.grey);
+        txt('R$ para ciência?', 50, 160, `900 80px ${GROT}`, C.ink);
+        const np = eio(P(a, T.r2 + 1.3, T.r2 + 1.7));
+        c.font = `900 80px ${GROT}`; marker(36, 180, c.measureText('Nenhum valor.').width + 30, 92, np, 31);
+        txt('Nenhum valor.', 50, 252, `900 80px ${GROT}`, C.ink, 'left', np > 0 ? 1 : 0);
+        wrap('Único R$ de investimento: R$ 900 bi em infraestrutura (p. 51).', 50, 318, `italic 44px ${SERIF}`, C.grey, w - 100, 48);
+      } },
+    { at: T.r3, y: 1245, h: 470, dir: 0, rot: -.008,
+      draw: (w, h, a) => {
+        txt('p. 71 · linha 2666', 50, 66, `500 34px ${MONO}`, C.grey);
+        txt('O que tem:', 50, 160, `900 80px ${GROT}`, C.ink);
+        const Q = '“uma regra clara de controle de gastos discricionários dos três Poderes da União.”';
+        const F = `italic 62px ${SERIF}`, L = wrapWords(Q, F, w - 100);
+        L.forEach((ln, i) => {
+          c.font = F; const lw = c.measureText(ln).width;
+          marker(40, 196 + i * 70, lw + 20, 66, eio(P(a, T.r3 + .7 + i * .45, T.r3 + 1.15 + i * .45)), 200 + i, C.red, true, .72);
+          txt(ln, 50, 250 + i * 70, F, C.ink);
+        });
+      } },
+  ];
+  // after r3 lands, push the first two up a bit and zoom slightly on the quote
+  const push = eio(P(t, T.r3, T.r3 + .5));
+  rows.forEach((r, i) => {
+    if (t < r.at) return;
+    const p = eo5(P(t, r.at, r.at + .4));
+    const x = W/2 + (1 - p) * (r.dir === 0 ? 0 : r.dir * 1200);
+    let y = r.y + (r.dir === 0 ? (1 - p) * 900 : 0);
+    if (i < 2) y -= push * 60;
+    const sc = i < 2 ? 1 - push * .06 : 1 + .02 * eo(P(t, T.r3 + .5, T.ponte));
+    const dimA = i < 2 ? 1 - push * .35 : 1;
+    card(x, y, 960, r.h, r.rot * (2 - p), sc, 1, (w, h) => { r.draw(w, h, t); if (dimA < 1) { c.fillStyle = `rgba(26,23,20,${1 - dimA})`; c.fillRect(0, 0, w, h); } });
+  });
+}
+
+// ---------- 4. PONTE 21.0 – 24.6 ----------
+function ponte(t) {
+  c.fillStyle = C.bg; c.fillRect(0, 0, W, H);
+  const zin = eo(P(t, T.ponte, T.hist));
+  // extreme close-up: one page filling the frame, slow push-in
+  c.save(); c.translate(W/2, 860); c.rotate(.035); c.scale(1 + zin * .05, 1 + zin * .05);
+  const pw = 1100, ph = 1180; c.translate(-pw/2, -ph/2);
+  paperRect(0, 0, pw, ph, false);
+  txt('p. 24 · linhas 893–897', 130, 120, `500 34px ${MONO}`, C.grey);
+  const Q = '“…dando continuidade ao trabalho que, no governo Bolsonaro, já havia conectado…”';
+  const F = `italic 88px ${SERIF}`, L = wrapWords(Q, F, pw - 280);
+  L.forEach((ln, i) => {
+    c.font = F; const lw = c.measureText(ln).width;
+    marker(120, 190 + i * 104, lw + 24, 96, eio(P(t, T.ponte + .4 + i * .35, T.ponte + .8 + i * .35)), 400 + i, C.red, true, .72);
+    txt(ln, 130, 265 + i * 104, F, C.ink, 'left', eo(P(t, T.ponte + .1, T.ponte + .4)));
+  });
+  c.restore();
+  // headline band
+  const hp = eo5(P(t, T.ponte + .2, T.ponte + .6));
+  c.save(); c.globalAlpha = hp; c.fillStyle = 'rgba(13,12,11,.94)'; c.fillRect(0, 1060, W, 420); c.restore();
+  wrap('O plano do Flávio promete continuar um programa do governo Jair Bolsonaro.', 60, 1150 + (1 - hp) * 30, `800 66px ${GROT}`, C.white, W - 120, 78, 'left', hp);
+  txt('Então, vale lembrar:', 60, 1420, `italic 72px ${SERIF}`, C.red, 'left', eo(P(t, T.lembrar, T.lembrar + .3)));
+}
+
+// ---------- 5. JÁ VIMOS ESSE FILME 24.6 – 35.6 ----------
+function hist(t) {
+  c.fillStyle = '#141210'; c.fillRect(0, 0, W, H);
+  // ghost year in the background
+  const yr = t < T.h2 ? '2021' : '2022';
+  txt(yr, W/2 + 40 - (t - T.hist) * 8, 1180, `italic 560px ${SERIF}`, 'rgba(244,240,232,.06)', 'center');
+  const hp = eo(P(t, T.hist, T.hist + .4));
+  txt('GOVERNO JAIR BOLSONARO (2019–2022)', 60, 215, `800 46px ${GROT}`, C.red, 'left', hp);
+  txt('Já vimos esse filme.', 60, 305, `italic 80px ${SERIF}`, C.white, 'left', hp);
+  const clips = [
+    { at: T.h1, rot: -.03, seed: 1, h: 900,
+      draw: (w) => {
+        txt('TELETIME · MIGALHAS · STF', 50, 70, `800 32px ${GROT}`, C.grey);
+        txt('MAR/2021 → JUL/2022', w - 50, 70, `500 32px ${MONO}`, C.grey, 'right');
+        c.fillStyle = C.ink; c.fillRect(50, 92, w - 100, 3);
+        const y = 200 + wrap('Vetou a lei de internet para alunos da rede pública.', 50, 200, `900 82px ${GROT}`, C.ink, w - 100, 90);
+        const y2 = y + 20 + wrap('O Congresso derrubou o veto.', 50, y + 20, `italic 62px ${SERIF}`, C.ink, w - 100, 70);
+        const sp = eio(P(t, T.h1 + 2.4, T.h1 + 2.9));
+        const L = wrapWords('STF validou a lei por unanimidade (jul/2022).', `800 62px ${GROT}`, w - 100);
+        L.forEach((ln, i) => { c.font = `800 62px ${GROT}`; marker(36, y2 + 20 + i * 76, c.measureText(ln).width + 28, 76, sp, 60 + i); txt(ln, 50, y2 + 80 + i * 76, `800 62px ${GROT}`, C.ink); });
+      } },
+    { at: T.h2, rot: .025, seed: 2, h: 900,
+      draw: (w) => {
+        txt('FOLHA · A GAZETA · MCTI', 50, 70, `800 32px ${GROT}`, C.grey);
+        txt('JUN/2022', w - 50, 70, `500 32px ${MONO}`, C.grey, 'right');
+        c.fillStyle = C.ink; c.fillRect(50, 92, w - 100, 3);
+        txt('R$ 2,5 bi', 40, 320, `900 196px ${GROT}`, C.ink);
+        wrap('do FNDCT bloqueados pelo governo Bolsonaro:', 50, 440, `800 62px ${GROT}`, C.ink, w - 100, 72);
+        txt('56% do disponível no ano.', 50, 610, `italic 72px ${SERIF}`, C.ink);
+        // stamp
+        const sp = P(t, T.h2 + 1.2, T.h2 + 1.3), ss = lerp(1.6, 1, eo(sp));
+        if (sp > 0) { c.save(); c.translate(w/2 + 40, 760); c.rotate(-.12); c.scale(ss, ss); c.globalAlpha = sp;
+          c.strokeStyle = C.red; c.lineWidth = 10; c.strokeRect(-260, -70, 520, 140);
+          txt('BLOQUEADO', 0, 30, `900 92px ${GROT}`, C.red, 'center'); c.restore(); }
+      } },
+    { at: T.h3, rot: -.015, seed: 3, h: 900,
+      draw: (w) => {
+        txt('AGÊNCIA SENADO', 50, 70, `800 32px ${GROT}`, C.grey);
+        txt('29/AGO/2022', w - 50, 70, `500 32px ${MONO}`, C.grey, 'right');
+        c.fillStyle = C.ink; c.fillRect(50, 92, w - 100, 3);
+        txt('MP 1.136', 40, 300, `900 200px ${GROT}`, C.ink);
+        wrap('limitou o FNDCT a', 50, 420, `800 66px ${GROT}`, C.ink, w - 100, 76);
+        const mp = eio(P(t, T.h3 + .9, T.h3 + 1.3));
+        c.font = `900 150px ${GROT}`; marker(36, 470, c.measureText('R$ 5,55 bi').width + 30, 160, mp, 88);
+        txt('R$ 5,55 bi', 50, 600, `900 150px ${GROT}`, C.ink);
+        txt('em 2022.', 50, 700, `italic 72px ${SERIF}`, C.ink);
+      } },
+  ];
+  clips.forEach((k, i) => {
+    if (t < k.at) return;
+    const next = clips[i + 1], buried = next && t >= next.at ? eio(P(t, next.at, next.at + .35)) : 0;
+    if (buried >= 1 && i < clips.length - 2) return;
+    const p = P(t, k.at, k.at + .22), s = lerp(1.35, 1, eo(p)) * (1 - buried * .1);
+    const [sx, sy] = shake(t, k.at + .22, 10, .3);
+    const x = W/2 + sx + buried * (i % 2 ? 90 : -90), y = 400 + 450 + sy + buried * 80;
+    card(x, y, 960, k.h, k.rot + buried * (i % 2 ? .05 : -.05), s, eo(P(t, k.at, k.at + .12)), (w, h) => { k.draw(w, h); if (buried) { c.fillStyle = `rgba(20,18,16,${buried * .7})`; c.fillRect(0, 0, w, h); } });
+  });
+}
+
+// ---------- 6. SILÊNCIO 35.6 – 39.0 ----------
+function silence(t) {
+  c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+  const a = eo(P(t, T.silTxt, T.silTxt + .6)), s = 1 + (t - T.silTxt) * .012;
+  c.save(); c.translate(W/2, 900); c.scale(s, s);
+  txt('E aí veio 2023.', 0, 0, `italic 128px ${SERIF}`, C.white, 'center', a);
+  c.restore();
+}
+
+// ---------- 7. VIRADA 39.0 – 50.6 ----------
+function virada(t) {
+  // light paper world: the turn
+  c.fillStyle = C.paper; c.fillRect(0, 0, W, H);
+  c.save(); c.globalAlpha = .9; c.fillStyle = paperPat; c.fillRect(0, 0, W, H); c.restore();
+  const hp = eo(P(t, T.vir, T.vir + .35));
+  if (t < T.v4 || t >= T.v5) txt('GOVERNO LULA (2023–2026)', 60, 215, `800 46px ${GROT}`, C.red, 'left', hp);
+  if (t < T.v2) {                                  // v1: reversal
+    const p = eo5(P(t, T.v1, T.v1 + .3));
+    c.save(); c.translate(W/2, 760); c.rotate(-.12);
+    c.globalAlpha = .9; c.strokeStyle = C.ink; c.lineWidth = 10; c.strokeRect(-300, -80, 600, 160);
+    txt('BLOQUEADO', 0, 34, `900 104px ${GROT}`, C.ink, 'center');
+    const sp = eio(P(t, T.v1 + .3, T.v1 + .65));
+    c.fillStyle = C.red; c.fillRect(-330, -8, 660 * sp, 18);
+    c.restore();
+    txt('Jan/2023:', 60, 1040, `italic 80px ${SERIF}`, C.ink, 'left', p);
+    wrap('governo anuncia reversão do bloqueio do FNDCT.', 60, 1140, `900 78px ${GROT}`, C.ink, W - 120, 88, 'left', p);
+  } else if (t < T.v3) {                           // v2: R$ 14,7 bi (counter lands frame-locked)
+    const p = eo5(P(t, T.v2, T.v2 + .35)), cp = eo(P(t, T.v2, T.v2 + .7));
+    const val = cp >= 1 ? '14,7' : (14.7 * cp).toFixed(1).replace('.', ',');
+    const x = 60 + (1 - p) * 400;
+    txt('LOA 2025 · FNDCT', x, 420, `500 40px ${MONO}`, C.grey, 'left', p);
+    txt('R$', x, 600, `900 120px ${GROT}`, C.ink, 'left', p);
+    txt(val, x - 10, 900, `900 330px ${GROT}`, C.ink, 'left', p);
+    txt('bilhões', x, 1050, `italic 110px ${SERIF}`, C.ink, 'left', p);
+    const mp = eio(P(t, T.v2 + 1.0, T.v2 + 1.4));
+    marker(50, 1110, 720, 100, mp, 140);
+    txt('16% acima de 2024', 70, 1190, `800 72px ${GROT}`, C.ink, 'left', eo(P(t, T.v2 + .9, T.v2 + 1.2)));
+    wrap('Orçamento aprovado (LOA) para o fundo em 2025.', 60, 1310, `italic 58px ${SERIF}`, C.grey, W - 120, 66, 'left', eo(P(t, T.v2 + 1.2, T.v2 + 1.6)));
+  } else if (t < T.v4) {                           // v3: maior valor já registrado
+    const p = eo5(P(t, T.v3, T.v3 + .35));
+    card(W/2, 860 + (1 - p) * 900, 960, 1000, .02 * (1 - p) - .01, 1, 1, (w) => {
+      txt('RELATÓRIO FNDCT · 4º TRI 2025', 50, 80, `500 32px ${MONO}`, C.grey);
+      c.fillStyle = C.ink; c.fillRect(50, 100, w - 100, 3);
+      txt('2025:', 50, 230, `italic 96px ${SERIF}`, C.ink);
+      txt('R$ 7 bi', 36, 480, `900 250px ${GROT}`, C.ink);
+      txt('pagos pelo FNDCT.', 50, 590, `800 72px ${GROT}`, C.ink);
+      const mp = eio(P(t, T.v3 + .6, T.v3 + 1.0));
+      const L = ['Maior valor já', 'registrado.'];
+      L.forEach((ln, i) => { c.font = `italic 104px ${SERIF}`; marker(36, 640 + i * 116, c.measureText(ln).width + 30, 112, mp, 150 + i); txt(ln, 50, 730 + i * 116, `italic 104px ${SERIF}`, C.ink); });
+    });
+  } else if (t < T.v5) {                           // v4: IMPACT R$ 23 bi
+    c.fillStyle = C.red; c.fillRect(0, 0, W, H);
+    const s = punch(t, T.v4, .18), [sx, sy] = shake(t, T.v4 + .1, 22);
+    txt('IA · 2024–2028', 60, 215, `800 46px ${GROT}`, C.white);
+    c.save(); c.translate(W/2 + sx, 820 + sy); c.scale(s, s);
+    txt('R$', 0, -300, `900 130px ${GROT}`, C.white, 'center');
+    txt('23 bi', 0, 60, `900 330px ${GROT}`, C.white, 'center');
+    c.restore();
+    const p = eo(P(t, T.v4 + .4, T.v4 + .8));
+    txt('Plano Brasileiro de IA', W/2, 1110, `italic 96px ${SERIF}`, C.white, 'center', p);
+    txt('2024–2028', W/2, 1220, `800 72px ${GROT}`, C.white, 'center', p);
+  } else {                                         // v5: supercomputer, spec sheet
+    c.fillStyle = '#16130f'; c.fillRect(0, 0, W, H);
+    txt('GOVERNO LULA (2023–2026)', 60, 215, `800 46px ${GROT}`, C.red);
+    const p = eo5(P(t, T.v5, T.v5 + .3));
+    const rows = [['anúncio', 'ago/2026'], ['o quê', 'supercomputador de IA'], ['valor', 'R$ 1 bi'], ['onde', 'Rio Grande do Norte']];
+    rows.forEach((r, i) => {
+      const rp = eo(P(t, T.v5 + .1 + i * .18, T.v5 + .35 + i * .18));
+      txt(r[0], 60, 470 + i * 150 - (1 - rp) * 20, `500 40px ${MONO}`, C.dim, 'left', rp);
+      txt(r[1], 60, 540 + i * 150 - (1 - rp) * 20, `800 ${i === 2 ? 76 : 62}px ${GROT}`, i === 2 ? '#ff4d6d' : C.white, 'left', rp);
+    });
+    wrap('Ago/2026: governo anuncia supercomputador de IA de R$ 1 bi no RN.', 60, 1150, `italic 66px ${SERIF}`, C.white, W - 120, 76, 'left', p);
+  }
+}
+
+// ---------- 8. RACIONAL 50.6 – 55.6 ----------
+function racional(t) {
+  c.fillStyle = C.bg; c.fillRect(0, 0, W, H);
+  const a = eo5(P(t, T.rac + .15, T.rac + .55));
+  txt('Não é torcida.', 60, 400 - (1 - a) * 40, `italic 140px ${SERIF}`, C.white, 'left', a);
+  wrap('É o dinheiro da pesquisa e da inovação da sua área.', 60, 540, `800 70px ${GROT}`, C.white, W - 120, 82, 'left', eo(P(t, T.rac + 1.2, T.rac + 1.6)));
+  const qp = eo5(P(t, T.racQ, T.racQ + .4));
+  card(W/2 + (1 - qp) * 1100, 1010, 960, 330, -.015, 1, qp, (w) => {
+    txt('PLANO DE LULA 2027–2030 · p. 50', 50, 70, `500 32px ${MONO}`, C.grey);
+    wrap('“continuidade do uso estratégico do FNDCT”', 50, 170, `italic 72px ${SERIF}`, C.ink, w - 100, 80);
+  });
+  const dp = eo(P(t, T.decide, T.decide + .3));
+  txt('Você decide.', 60, 1390, `900 96px ${GROT}`, C.red, 'left', dp);
+}
+
+// ---------- 9. END CARD 55.6 – 60 ----------
+function endCard(t) {
+  c.fillStyle = C.bg; c.fillRect(0, 0, W, H);
+  const a = eo5(P(t, T.end + .05, T.end + .5));
+  txt('2º TURNO', W/2, 470, `800 54px ${GROT}`, C.red, 'center', a);
+  txt('25', W/2, 860 + (1 - a) * 40, `italic 420px ${SERIF}`, C.white, 'center', a);
+  txt('DE OUTUBRO', W/2, 990 + (1 - a) * 40, `900 112px ${GROT}`, C.white, 'center', a);
+  const lp = eio(P(t, T.lula - .05, T.lula + .25)), s = punch(t, T.lula, .1);
+  const bw = 760, bh = 230, by = 1080;
+  c.save(); c.translate(W/2, by + bh/2); c.scale(s, s); c.translate(-W/2, -(by + bh/2));
+  marker((W - bw) / 2, by, bw, bh, lp, 313, C.red, false, 1);
+  txt('LULA 13', W/2, by + 180, `900 168px ${GROT}`, C.white, 'center', eo(P(t, T.lula + .05, T.lula + .3)));
+  c.restore();
+  txt('Fontes na legenda', W/2, 1430, `600 54px ${GROT}`, C.dim, 'center', eo(P(t, T.lula + .6, T.lula + 1)));
+}
+
+// ---------- persistent footer: source + mandatory AI label ----------
+const SOURCES = [
+  [T.zero, T.def, 'Fonte: plano de governo Flávio 2027–2030 (PDF, Agência Brasil), busca por “FNDCT”'],
+  [T.def, T.tem, 'Fonte: Lei 11.540/2007, art. 1º e 7º · plano Flávio 2027–2030'],
+  [T.tem, T.ponte, 'Fonte: plano de governo Flávio 2027–2030, p. 25, 51, 56 e 71'],
+  [T.ponte, T.hist, 'Fonte: plano de governo Flávio 2027–2030, p. 24'],
+  [T.h1, T.h2, 'Fonte: STF, ADI 6926; Teletime, 08/07/2022; Migalhas'],
+  [T.h2, T.h3, 'Fonte: Folha/A Gazeta, 27/06/2022; MCTI'],
+  [T.h3, T.sil, 'Fonte: Agência Senado, 29/08/2022; MP 1.136/2022'],
+  [T.v1, T.v2, 'Fonte: Metrópoles, jan/2023'],
+  [T.v2, T.v3, 'Fonte: MCTI/Finep, mar. 2025'],
+  [T.v3, T.v4, 'Fonte: MCTI, Relatório FNDCT 4º tri 2025'],
+  [T.v4, T.v5, 'Fonte: MCTI, apresentação à Câmara, 27/08/2025'],
+  [T.v5, T.rac, 'Fonte: Agência Brasil; Convergência Digital, 20/08/2026'],
+  [T.racQ, T.end, 'Fonte: Programa de Governo Lula 2027-2030 (TSE), p. 50'],
+];
+function footer(t) {
+  c.fillStyle = 'rgba(13,12,11,.95)'; c.fillRect(0, 1500, W, 220);
+  c.fillStyle = 'rgba(228,0,43,.9)'; c.fillRect(60, 1500, 80, 5);
+  const s = SOURCES.find(([a, b]) => t >= a && t < b);
+  if (s) wrap(s[2], 60, 1568, `600 40px ${GROT}`, '#efe9dd', W - 120, 48, 'left', eo(P(t, s[0], s[0] + .2)));
+  txt(AI_LABEL, 60, 1674, `600 32px ${GROT}`, '#c4bcaf');
+}
+
+function wipe(t, at, dur = .32, color = C.red) {
+  const p = P(t, at - dur * .5, at + dur * .5); if (p <= 0 || p >= 1) return;
+  c.save(); c.translate(W/2, H/2); c.rotate(-.18);
+  const x = lerp(-W * 1.6, W * 1.6, eio(p));
+  c.fillStyle = color; c.fillRect(x - W * .7, -H, W * 1.4, H * 2); c.restore();
+}
+
+let fontsOK = true;
+function seek(t) {
+  t = ((t % DUR) + DUR) % DUR; pat();
+  for (const [a, d] of FREEZES) if (t >= a && t < a + d) { t = a; break; }
+  c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+  c.fillStyle = C.bg; c.fillRect(0, 0, W, H);
+  if (t < T.def) hook(t);
+  else if (t < T.tem) whatIs(t);
+  else if (t < T.ponte) oQueTem(t);
+  else if (t < T.hist) ponte(t);
+  else if (t < T.sil) hist(t);
+  else if (t < T.vir) silence(t);
+  else if (t < T.rac) virada(t);
+  else if (t < T.end) racional(t);
+  else endCard(t);
+  for (const at of [T.def, T.tem, T.ponte, T.hist, T.rac, T.end]) wipe(t, at);
+  wipe(t, T.vir, .3, C.white);
+  if (t < T.vir || t >= T.rac) vignette(t >= T.sil && t < T.vir ? 0 : .5);
+  grain(t);
+  footer(t);
+  const out = P(t, DUR - .3, DUR); if (out > 0) { c.fillStyle = `rgba(13,12,11,${out})`; c.fillRect(0, 0, W, H); }
+  if (!fontsOK) { c.fillStyle = '#ff0'; c.fillRect(0, 0, W, 90); txt('FONTES NÃO CARREGARAM — não renderizar', W/2, 62, '700 40px sans-serif', '#000', 'center'); }
+}
+
+// ---------- SCORE (100 BPM; D minor → silence → D major) ----------
+let voData = null;   // ArrayBuffers fetched once
+const loadVO = () => voData || (voData = Promise.all(VO.map(([n]) => fetch(`vo/${n}.wav`).then(r => { if (!r.ok) { console.error('VO faltando: ' + n + ' (gere com scripts/tts.sh)'); return null; } return r.arrayBuffer(); }).catch(() => null))));
+function buildScore(ac, dest, T0, voBufs = []) {
+  const sr = ac.sampleRate;
+  const nb = ac.createBuffer(1, sr * 2, sr); { const d = nb.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = hash(i * .37 + 1.3) * 2 - 1; }
+  const ir = ac.createBuffer(2, sr * 2.6, sr);
+  for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = (hash(i * 1.91 + ch * 77) * 2 - 1) * Math.pow(1 - i / d.length, 3.2); }
+  const at = s => T0 + s;
+  // mix: music bus → comp → duck → sum ; VO → voComp → sum ; sum → limiter → out
+  const sum = ac.createGain();
+  const lim = ac.createDynamicsCompressor(); lim.threshold.value = -2; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = .001; lim.release.value = .08;
+  const out = ac.createGain(); out.gain.value = .95; sum.connect(lim).connect(out).connect(dest);
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -20; comp.ratio.value = 4; comp.attack.value = .005; comp.release.value = .2;
+  const make = ac.createGain(); make.gain.value = 1.3;
+  const duck = ac.createGain(); duck.gain.value = 1;
+  const mute = ac.createGain(); mute.gain.value = 1;     // tape-stop / true silence
+  comp.connect(make).connect(duck).connect(mute).connect(sum);
+  const bus = ac.createGain(); bus.connect(comp);
+  const verb = ac.createConvolver(); verb.buffer = ir; const vret = ac.createGain(); vret.gain.value = .3; verb.connect(vret).connect(bus);
+  // saturation for low hits (harmonics a phone speaker can play)
+  const satCurve = new Float32Array(1024); for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; satCurve[i] = Math.tanh(x * 3.2); }
+  const sat = ac.createWaveShaper(); sat.curve = satCurve; sat.oversample = '2x'; const satG = ac.createGain(); satG.gain.value = .55; sat.connect(satG).connect(bus);
+
+  const noise = (t, dur, { type = 'bandpass', f = 2000, f2 = null, q = 1, g = .3, a = .002, pan = 0, send = 0, to = bus } = {}) => {
+    const s = ac.createBufferSource(); s.buffer = nb; s.loop = true;
+    const fl = ac.createBiquadFilter(); fl.type = type; fl.Q.value = q; fl.frequency.setValueAtTime(f, t); if (f2) fl.frequency.exponentialRampToValueAtTime(f2, t + dur);
+    const gg = ac.createGain(); gg.gain.setValueAtTime(0, t); gg.gain.linearRampToValueAtTime(g, t + a); gg.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    const pn = ac.createStereoPanner(); pn.pan.value = pan;
+    s.connect(fl).connect(gg).connect(pn).connect(to);
+    if (send) { const sg = ac.createGain(); sg.gain.value = send; pn.connect(sg).connect(verb); }
+    s.start(t, hash(t * 13) * 1.5); s.stop(t + dur + .05); return gg;
+  };
+  const tone = (t, dur, { f = 440, f2 = null, type = 'sine', g = .3, a = .005, pan = 0, send = 0, lp = null, to = bus } = {}) => {
+    const o = ac.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, t); if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur * .6);
+    const gg = ac.createGain(); gg.gain.setValueAtTime(0, t); gg.gain.linearRampToValueAtTime(g, t + a); gg.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    const pn = ac.createStereoPanner(); pn.pan.value = pan;
+    let n = o; if (lp) { const fl = ac.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = lp; o.connect(fl); n = fl; }
+    n.connect(gg).connect(pn).connect(to);
+    if (send) { const sg = ac.createGain(); sg.gain.value = send; pn.connect(sg).connect(verb); }
+    o.start(t); o.stop(t + dur + .05);
+  };
+  const penTick = (t, pan = 0, g = .3) => { noise(t, .035, { f: 3200, q: 3, g, pan }); tone(t, .03, { f: 1900, g: g * .25, pan }); };
+  const keyTap = (t, pan) => { noise(t, .05, { f: 2400, q: 1.5, g: .5, pan }); noise(t, .09, { type: 'lowpass', f: 400, g: .35, pan }); };
+  const paperFlip = (t, pan = 0, g = .45) => { noise(t, .26, { f: 900, f2: 4200, q: .8, g, a: .03, pan, send: .2 }); noise(t + .12, .12, { type: 'highpass', f: 5000, g: g * .4, pan }); };
+  const markerStroke = (t, dur, g = .28, pan = 0) => {
+    const gg = noise(t, dur, { f: 2100, f2: 2600, q: 7, g, a: .03, pan });
+    const lfo = ac.createOscillator(); lfo.frequency.value = 23; const lg = ac.createGain(); lg.gain.value = g * .5; lfo.connect(lg).connect(gg.gain); lfo.start(t); lfo.stop(t + dur);
+    noise(t, dur, { type: 'highpass', f: 6000, g: g * .3, a: .03, pan });
+  };
+  // mid-range transient: paper slam / snare body (200 Hz – 2 kHz) so hits survive phone speakers
+  const slam = (t, g = .8) => {
+    noise(t, .18, { f: 1100, q: .9, g, a: .001, send: .35 });
+    noise(t, .09, { f: 420, q: 1.2, g: g * .9, a: .001 });
+    tone(t, .16, { f: 210, f2: 140, type: 'triangle', g: g * .6, a: .001 });
+    noise(t, .05, { type: 'highpass', f: 3500, g: g * .3, a: .001 });
+  };
+  const boom = (t, g = 1, len = 2.6) => {
+    tone(t, len, { f: 72, f2: 30, g: g, a: .004, send: .15 });
+    tone(t, len * .6, { f: 72, f2: 34, g: g * .9, a: .004, to: sat });     // saturated copy → 144/216 Hz harmonics
+    tone(t, .25, { f: 160, f2: 45, type: 'triangle', g: g * .6 });
+    noise(t, .5, { type: 'lowpass', f: 900, f2: 120, g: g * .7, send: .5 });
+    noise(t, 1.6, { type: 'bandpass', f: 300, q: .7, g: g * .15, a: .01, send: 1 });
+    slam(t, g * .8);
+  };
+  const hitChord = (t, notes, g = .14, len = 2.2, cut = 2400) => {
+    notes.forEach((f, i) => { [-7, 7].forEach((det, j) => {
+      const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.detune.value = det;
+      const fl = ac.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.setValueAtTime(cut, t); fl.frequency.exponentialRampToValueAtTime(180, t + len);
+      const gg = ac.createGain(); gg.gain.setValueAtTime(0, t); gg.gain.linearRampToValueAtTime(g, t + .01); gg.gain.exponentialRampToValueAtTime(.0001, t + len);
+      const pn = ac.createStereoPanner(); pn.pan.value = (j ? .35 : -.35) * (i % 2 ? -1 : 1);
+      o.connect(fl).connect(gg).connect(pn).connect(bus); const sg = ac.createGain(); sg.gain.value = .5; pn.connect(sg).connect(verb);
+      o.start(t); o.stop(t + len + .05); }); });
+  };
+  const kick = (t, g = .6) => { tone(t, .42, { f: 120, f2: 42, g, a: .002 }); tone(t, .1, { f: 180, f2: 90, type: 'triangle', g: g * .35, a: .001 }); noise(t, .02, { type: 'highpass', f: 2500, g: g * .2 }); };
+  const hat = (t, g = .08, pan = 0) => noise(t, .04, { type: 'highpass', f: 8000, g, pan });
+  const clap = (t, g = .3) => { for (let k = 0; k < 3; k++) noise(t + k * .012, .12, { f: 1500, q: 1.1, g: g * (k === 2 ? 1 : .6), a: .001, send: .25 }); };
+  const pluck = (t, f, g = .07, pan = 0) => tone(t, .35, { f, type: 'triangle', g, a: .003, pan, send: .2, lp: 2400 });
+  const riser = (t0, t1, g = .22) => {
+    const s = ac.createBufferSource(); s.buffer = nb; s.loop = true;
+    const fl = ac.createBiquadFilter(); fl.type = 'bandpass'; fl.Q.value = 2; fl.frequency.setValueAtTime(500, t0); fl.frequency.exponentialRampToValueAtTime(7000, t1);
+    const gg = ac.createGain(); gg.gain.setValueAtTime(.0001, t0); gg.gain.exponentialRampToValueAtTime(g, t1 - .02); gg.gain.linearRampToValueAtTime(0, t1);
+    s.connect(fl).connect(gg).connect(bus); s.start(t0); s.stop(t1 + .02);
+    tone(t0, t1 - t0, { f: 220, f2: 880, type: 'sine', g: g * .25, a: (t1 - t0) * .9 });
+  };
+  // tape-stop: pitch + filter fall, then the caller mutes the bus
+  const tapeStop = (t, dur = .16, g = .3) => {
+    [146.8, 220, 293.7].forEach((f, i) => {
+      const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * .18, t + dur);
+      const fl = ac.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.setValueAtTime(3000, t); fl.frequency.exponentialRampToValueAtTime(150, t + dur);
+      const gg = ac.createGain(); gg.gain.setValueAtTime(g / (i + 1), t); gg.gain.linearRampToValueAtTime(0, t + dur);
+      o.connect(fl).connect(gg).connect(bus); o.start(t); o.stop(t + dur + .02);
+    });
+    noise(t, dur, { type: 'lowpass', f: 4000, f2: 120, g: g * .8, a: .001 });
+  };
+  const pad = (t0, t1, notes, g = .05, cut = 500) => {
+    notes.forEach((f, i) => {
+      const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.detune.value = (i % 2 ? 5 : -5);
+      const fl = ac.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = cut;
+      const gg = ac.createGain(); gg.gain.setValueAtTime(0, t0); gg.gain.linearRampToValueAtTime(g, t0 + .6); gg.gain.setValueAtTime(g, t1 - .5); gg.gain.linearRampToValueAtTime(0, t1);
+      o.connect(fl).connect(gg).connect(bus); o.start(t0); o.stop(t1 + .05);
+    });
+  };
+  const beatsIn = (a, b, fn) => { for (let k = Math.ceil(a / B - 1e-6); k * B < b - 1e-6; k++) fn(k * B, k); };
+
+  // room tone
+  { const s = ac.createBufferSource(); s.buffer = nb; s.loop = true; const fl = ac.createBiquadFilter(); fl.type = 'bandpass'; fl.frequency.value = 5000; fl.Q.value = .5;
+    const gg = ac.createGain(); gg.gain.setValueAtTime(0, at(0)); gg.gain.linearRampToValueAtTime(.02, at(.3)); gg.gain.setValueAtTime(.02, at(DUR - .5)); gg.gain.linearRampToValueAtTime(0, at(DUR - .05));
+    s.connect(fl).connect(gg).connect(bus); s.start(at(0)); s.stop(at(DUR)); }
+
+  // 1 HOOK: foley, riser, tape-stop, real silence, the 0
+  paperFlip(at(.02), .2, .35); paperFlip(at(.14), -.2, .25);
+  noise(at(.05), .3, { type: 'lowpass', f: 300, g: .35 });
+  for (let i = 0; i < 7; i++) keyTap(at(T.type + i * .085), (i - 3) * .1);
+  markerStroke(at(T.sweep), .3, .22, -.2);
+  paperFlip(at(T.sweep + .3 - .18), -.5, .5); paperFlip(at(T.sweep + .55 - .18), .5, .5);
+  riser(at(T.sweep), at(T.stop), .25);
+  tapeStop(at(T.stop - .02), .16);
+  mute.gain.setValueAtTime(1, at(T.stop + .12)); mute.gain.linearRampToValueAtTime(0, at(T.stop + .15));
+  mute.gain.setValueAtTime(0, at(T.zero - .005)); mute.gain.linearRampToValueAtTime(1, at(T.zero));
+  boom(at(T.zero), 1.0, 3.0);
+  hitChord(at(T.zero), [36.7, 73.4, 110, 146.8, 220], .11, 2.6, 2000);
+  // 2–13: D minor drone + pulse
+  pad(at(T.zero + .2), at(T.tem), [73.4, 87.3, 110, 146.8], .035, 520);
+  beatsIn(3.0, T.tem, (b, k) => { kick(at(b), .42); if (k % 2) penTick(at(b + B / 2), (k % 4 === 1 ? .3 : -.3), .14); });
+  beatsIn(T.def, T.tem, (b, k) => { [146.8, 174.6, 220, 174.6][k % 4] && pluck(at(b + B / 2), [146.8, 174.6, 220, 174.6][k % 4], .05, .2); });
+  riser(at(T.def - .5), at(T.def - .02), .16); paperFlip(at(T.def - .08), 0, .6); slam(at(T.def), .55);
+  hitChord(at(T.def), [73.4, 110, 146.8], .06, 1.4, 1400);
+  { const words = DEF.split(' ').length; for (let i = 0; i < words; i++) penTick(at(T.defWords + (T.defEnd - T.defWords) * i / words), (hash(i) - .5) * .6, .12); }
+  boom(at(T.menc), .6, 2.0); markerStroke(at(T.menc + .1), .45, .3, 0);
+  // 3 O QUE TEM 13.2–21: groove + hats, stamps
+  pad(at(T.tem), at(T.ponte), [73.4, 87.3, 110, 130.8], .032, 650);
+  beatsIn(T.tem, T.ponte, (b, k) => { kick(at(b), .45); hat(at(b + B / 2), .07, .25); if (k % 2) hat(at(b + B / 4), .04, -.25); pluck(at(b + B / 2), [146.8, 174.6, 220, 261.6][k % 4], .045, -.2); });
+  [T.r1, T.r2, T.r3].forEach((x, i) => { paperFlip(at(x - .05), i % 2 ? .4 : -.4, .5); slam(at(x + .3), .5); });
+  markerStroke(at(T.r2 + 1.3), .4, .26); markerStroke(at(T.r3 + .7), 1.4, .22);
+  // 4 PONTE 21–24.6: thin out, heartbeat
+  pad(at(T.ponte), at(T.hist), [73.4, 110, 146.8], .03, 420);
+  beatsIn(T.ponte, T.hist, (b, k) => { if (k % 2 === 0) { kick(at(b), .5); kick(at(b + .18), .3); } });
+  markerStroke(at(T.ponte + .4), 1.0, .2); penTick(at(T.lembrar), 0, .25);
+  // 5 HIST 24.6–35.6: darker, pulse, slams on each clipping, small build at the end
+  pad(at(T.hist), at(T.sil), [58.3, 73.4, 87.3, 116.5], .04, 480);
+  beatsIn(T.hist, T.sil, (b, k) => { kick(at(b), .5); hat(at(b + B / 2), .05); if (k % 4 === 2) clap(at(b), .14); });
+  [T.h1, T.h2, T.h3].forEach(x => { slam(at(x + .22), .9); noise(at(x + .22), .3, { type: 'lowpass', f: 300, g: .45 }); });
+  boom(at(T.h2 + 1.2), .55, 1.6);                    // BLOQUEADO stamp
+  markerStroke(at(T.h1 + 2.4), .5, .26); markerStroke(at(T.h3 + .9), .4, .26);
+  riser(at(T.sil - 1.6), at(T.sil - .02), .16);
+  // 6 SILÊNCIO: tape-stop, then true silence (only the voice)
+  tapeStop(at(T.sil - .02), .2, .35);
+  mute.gain.setValueAtTime(1, at(T.sil + .15)); mute.gain.linearRampToValueAtTime(0, at(T.sil + .2));
+  mute.gain.setValueAtTime(0, at(T.vir - .005)); mute.gain.linearRampToValueAtTime(1, at(T.vir));
+  // 7 VIRADA 39–50.6: D major, brighter groove
+  boom(at(T.vir), .9, 2.6); hitChord(at(T.vir), [73.4, 146.8, 185, 220, 293.7], .1, 2.4, 2800);
+  pad(at(T.vir), at(T.rac), [73.4, 92.5, 110, 146.8, 185], .03, 900);
+  beatsIn(T.vir + B, T.rac, (b, k) => {
+    kick(at(b), .55); if (k % 2) clap(at(b), .22);
+    hat(at(b + B / 2), .08, .2); hat(at(b + B / 4), .035, -.3); hat(at(b + 3 * B / 4), .035, .3);
+    pluck(at(b), [293.7, 370, 440, 370][k % 4], .05, -.2); pluck(at(b + B / 2), [440, 587.3, 440, 554.4][k % 4], .04, .25);
+  });
+  slam(at(T.v1 + .3), .6); markerStroke(at(T.v1 + .3), .35, .3);
+  slam(at(T.v2), .6); for (let i = 0; i < 8; i++) penTick(at(T.v2 + i * .085), 0, .12);
+  markerStroke(at(T.v2 + 1.0), .4, .24);
+  slam(at(T.v3), .6); paperFlip(at(T.v3 - .05), .3, .5); markerStroke(at(T.v3 + .6), .4, .24);
+  riser(at(T.v4 - 1.4), at(T.v4 - .03), .3);
+  boom(at(T.v4), 1.0, 2.8); hitChord(at(T.v4), [36.7, 73.4, 146.8, 185, 220, 293.7], .11, 2.4, 3200);
+  for (let i = 0; i < 4; i++) tone(at(T.v5 + .1 + i * .18), .07, { f: 1760, type: 'square', g: .05, lp: 3000 });
+  // 8 RACIONAL 50.6–55.6: groove drops, pad + soft pulse
+  pad(at(T.rac), at(T.end + .2), [73.4, 92.5, 110, 146.8], .03, 600);
+  beatsIn(T.rac, T.end, (b, k) => { if (k % 2 === 0) kick(at(b), .35); });
+  slam(at(T.racQ), .4); paperFlip(at(T.racQ - .05), .4, .45);
+  penTick(at(T.decide), 0, .3);
+  // 9 END CARD
+  riser(at(T.end - B), at(T.end - .03), .24);
+  boom(at(T.end), .95, 2.8); hitChord(at(T.end), [36.7, 73.4, 110, 146.8, 185, 220], .1, 2.6, 2600);
+  paperFlip(at(T.end - .05), 0, .4);
+  markerStroke(at(T.lula - .05), .3, .3, 0); kick(at(T.lula), .6); slam(at(T.lula), .7);
+  hitChord(at(T.lula), [146.8, 185, 220, 293.7], .07, 2.0, 3000);
+  penTick(at(T.lula + .6), 0, .25);
+  pad(at(T.end), at(DUR - .1), [73.4, 92.5, 110, 146.8], .03, 700);
+
+  // VO + ducking
+  const voComp = ac.createDynamicsCompressor(); voComp.threshold.value = -20; voComp.ratio.value = 3; voComp.attack.value = .003; voComp.release.value = .12;
+  const voG = ac.createGain(); voG.gain.value = 1.25; voComp.connect(voG).connect(sum);
+  VO.forEach(([n, st, d], i) => {
+    const b = voBufs[i]; if (!b) return;
+    const s = ac.createBufferSource(); s.buffer = b; s.connect(voComp); s.start(at(st));
+    const e = st + b.duration;
+    duck.gain.setValueAtTime(1, at(st - .12)); duck.gain.linearRampToValueAtTime(.32, at(st - .02));
+    duck.gain.setValueAtTime(.32, at(e)); duck.gain.linearRampToValueAtTime(1, at(e + .35));
+  });
+}
+async function renderAudio() {
+  const sr = 44100, oc = new OfflineAudioContext(2, Math.round(sr * DUR), sr);
+  const raw = await loadVO();
+  const bufs = await Promise.all(raw.map(ab => ab ? oc.decodeAudioData(ab.slice(0)) : null));
+  buildScore(oc, oc.destination, 0, bufs); return oc.startRendering();
+}
+
+// ---------- fonts / ready (fail visibly) ----------
+const FONTS = [`italic 100px 'Instrument Serif'`, `800 100px 'Inter Tight'`, `900 100px 'Inter Tight'`, `600 100px 'Inter Tight'`, `500 100px 'JetBrains Mono'`, `700 100px 'JetBrains Mono'`];
+const ready = Promise.all(FONTS.map(f => document.fonts.load(f))).then(() => document.fonts.ready).then(() => {
+  fontsOK = FONTS.every(f => document.fonts.check(f));
+  if (!fontsOK) console.error('fonts missing: rendering would fall back to system fonts');
+}).catch(e => { fontsOK = false; console.error('font load failed', e); }).then(() => loadVO()).then(() => seek(0));
+
+// ---------- live playback: buffers scheduled back-to-back (no gap, no drift) ----------
+let ac, t0, buf, raf, next;
+const playBtn = document.getElementById('play');
+playBtn.onclick = async () => {
+  playBtn.classList.add('hidden');
+  ac = ac || new AudioContext(); await ac.resume(); buf = buf || await renderAudio();
+  next = ac.currentTime + .1; t0 = next;
+  const sched = () => { const s = ac.createBufferSource(); s.buffer = buf; s.connect(ac.destination); s.start(next); next += buf.duration; };
+  sched(); sched();
+  cancelAnimationFrame(raf);
+  (function loop() { if (ac.currentTime > next - buf.duration) sched(); seek(Math.max(0, ac.currentTime - t0) % DUR); raf = requestAnimationFrame(loop); })();
+};
+
+window.MOTION = { duration: DUR, bpm: BPM, ready, seek, renderAudio };
+})();
+</script>
+</body>
+</html>
