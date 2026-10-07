@@ -12,4 +12,5 @@ Fontes:
 
 #Lula13 #<tema> #<público>
 
-(≤ 1.200 caracteres. Sem pedir "impulsione". Nada que não esteja no vídeo/facts.md.)
+(Fontes: nome curto + domínio/caminho curto; as URLs completas ficam no facts.md e podem ir no 1º comentário se a legenda passar do limite.
+ ≤ 1.200 caracteres. Sem pedir "impulsione". Nada que não esteja no vídeo/facts.md.)

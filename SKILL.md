@@ -42,13 +42,24 @@ Copie `assets/brief-template.md`. A estrutura que funcionou em 60 s:
 | 46–54 | racional | por que importa para *esse* público, sem insulto |
 | 54–60 | card | "25 DE OUTUBRO · LULA 13" + "Fontes na legenda" |
 
+**Outras durações** (mesma ordem de beats, cortando respiro, não argumento):
+
+| duração | palavras de voz | beats | o que sai |
+|---|---|---|---|
+| 60 s | 130–140 | 9 | — |
+| 45 s | 90–100 | 8 | "o que é" vira legenda do gancho; histórico com 1–2 fatos |
+| 30 s | 55–65 | 5 | gancho → 1 fato do adversário → 1 do histórico → 1 virada → card |
+
+Estimativa antes do TTS: ~2,9 palavras/s depois do `vo-prep` a 1.08–1.12. Os stills podem sair com durações estimadas; troque pelas medidas quando os WAVs existirem.
+
 Quem assiste está com o som desligado na maioria das vezes, então o texto na tela precisa carregar o argumento sozinho e a voz reforça. Cada tela de dado leva um rótulo curto de fonte ("Fonte: MCTI, 2025").
 
 ## 3. Motion (HTML/JS determinístico → MP4)
 Leia `references/motion.md`, que traz o contrato `window.MOTION`, safe zones do Reels, áudio e armadilhas.
 - **Rápido:** parta de `assets/estilos/dossie-60s/index.html`, o estilo vencedor ("dossiê/forense": papel, marca-texto vermelho, citação com página). Troque `T` (timeline), `VO`, as cenas e as strings. Para público dev, `assets/estilos/terminal-10s/` tem a linguagem de terminal.
 - **Exploratório:** 3 direções de 10 s em paralelo → juiz → estender a vencedora (ver `references/workflow.md`). Vale a pena para um público ou tema novo.
-- Stills antes do render: `W=1080 H=1920 node scripts/render-motion.mjs final final/stills --stills 1.5,6,12,20,28,36,42,50,57`. Abra cada imagem e corrija sobreposição, texto ilegível e safe zone.
+- Stills antes do render: um por cena, no meio dela (para 60 s: `--stills 1.5,6,12,20,28,36,42,50,57`), com `W=1080 H=1920 node scripts/render-motion.mjs final final/stills --stills <tempos>`. Abra cada imagem e corrija sobreposição, texto ilegível e safe zone.
+- Mudou a duração ou removeu uma cena? Leia `assets/estilos/dossie-60s/STYLE.md` ("Adaptar"): a trilha usa as mesmas chaves `T.*`, e chave apagada vira tempo `NaN` sem erro visível.
 
 ## 4. Narração (Gemini TTS)
 Leia `references/tts.md`. Em resumo:
@@ -56,7 +67,8 @@ Leia `references/tts.md`. Em resumo:
 2. Gere um WAV por beat: `scripts/tts.sh "<só o texto>" final/vo/raw/b1.wav Charon`.
 3. Trate o áudio: `scripts/vo-prep.sh raw/b1.wav vo/b1.wav 1.12`. O script imprime a duração final.
 4. A imagem segue a voz: ponha as durações reais em `VO` e ajuste `T`.
-5. Ouça, ou transcreva com whisper se não puder ouvir, para checar se a voz leu algo que não devia.
+5. Ouça, ou transcreva com whisper se não puder ouvir, para checar se a voz leu algo que não devia (`references/tts.md` tem o comando e o modelo).
+6. Se só parte da voz existe, deixe em `VO` só os beats gerados; o template avisa no console os que faltam.
 
 ## 5. Render e entrega
 ```bash

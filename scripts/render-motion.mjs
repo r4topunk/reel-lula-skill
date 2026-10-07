@@ -3,7 +3,9 @@
 //   node render-motion.mjs <dir> <stillsDir> --stills 0,1.5,4.2             JPEG stills at those times (s)
 // Env: CHROME=<path do Chrome> W=1440 H=1080 FPS=60 LUFS=-12 (loudness of the final mix), OVERLAY=<css selector to hide> (default: heuristic).
 // Contract: window.MOTION = { duration, seek(t), renderAudio(): Promise<AudioBuffer> }.
-import puppeteer from 'puppeteer-core';
+let puppeteer;
+try { puppeteer = (await import('puppeteer-core')).default; }
+catch { console.error('puppeteer-core não instalado. Rode: cd "' + decodeURIComponent(new URL('.', import.meta.url).pathname) + '" && npm i'); process.exit(1); }
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, mkdir, writeFile, rm } from 'node:fs/promises';
@@ -42,6 +44,8 @@ await p.goto(`http://127.0.0.1:${port}/${PAGE}/index.html`, { waitUntil: 'domcon
 await p.evaluate(() => new Promise(r => { if (document.readyState === 'complete') return r(); addEventListener('load', r); setTimeout(r, 15000); })); step('loaded');
 await p.waitForFunction(() => window.MOTION && typeof window.MOTION.seek === 'function', { timeout: 60000 }); step('MOTION found');
 await p.evaluate(() => Promise.race([document.fonts ? document.fonts.ready.then(() => 1) : 1, new Promise(r => setTimeout(r, 8000))])); step('fonts');
+// Espera MOTION.ready (fontes + WAVs): o seek(0) do próprio ready não pode cair depois do primeiro seek(t) do renderer.
+await p.evaluate(() => Promise.race([Promise.resolve(window.MOTION.ready).catch(e => console.error('MOTION.ready falhou: ' + e)), new Promise(r => setTimeout(r, 60000))])); step('ready');
 const dur = await p.evaluate(() => +window.MOTION.duration || 10);
 const hidden = await p.evaluate(sel => { window.__CAPTURE = true;
   const cands = sel ? [...document.querySelectorAll(sel)] : [...document.querySelectorAll('[id*=play i],[class*=play i],[id*=overlay i],[class*=overlay i],[id*=start i],[class*=start i]')]

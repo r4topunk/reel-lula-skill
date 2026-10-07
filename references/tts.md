@@ -14,6 +14,7 @@
 6. **A imagem segue a voz.** Meça cada WAV final (o script imprime a duração) e monte `VO = [[arquivo, início, duração], ...]` e a timeline `T` a partir disso. Deixe ~0,3–0,6 s de respiro entre beats.
 
 ## Orçamento de fala
+- Ritmo medido: ~2,9 palavras/s depois do `vo-prep` a 1.08–1.12. Use para estimar antes de gerar.
 - 60 s de vídeo ≈ 130–140 palavras de narração (≈ 50 s de fala), com 2 s de gancho sem voz e um beat de silêncio.
 - A voz não lê o rótulo de fonte nem números secundários; ela diz a ideia e a tela mostra o detalhe.
 
@@ -24,4 +25,9 @@
 - Alvo após o render: ≈ −12 LUFS integrado, true peak ≤ −1 dB (`check-render.sh`).
 
 ## Verificação sem ouvir
-`whisper-cli` (whisper.cpp) ou `whisper` transcreve cada beat: o texto tem que bater com o `vo.md`. Isso não substitui ouvir num celular; diga isso na entrega.
+Com whisper.cpp (`brew install whisper-cpp`), baixe um modelo uma vez e transcreva em 16 kHz:
+```bash
+mkdir -p ~/.cache/whisper && curl -L -o ~/.cache/whisper/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+ffmpeg -loglevel error -y -i vo/b1.wav -ar 16000 -ac 1 /tmp/b1-16k.wav && whisper-cli -m ~/.cache/whisper/ggml-base.bin -l pt -nt -f /tmp/b1-16k.wav
+```
+A transcrição de cada beat tem que bater com o `vo.md`. Isso não substitui ouvir num celular; diga isso na entrega.

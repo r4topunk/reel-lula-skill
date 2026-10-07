@@ -20,6 +20,9 @@ Objetivo: cada frase do vídeo (tela e voz) tem uma linha no `facts.md` com stat
 | Data errada | MP 1.136 é de 29/08/2022, não 26/08 | Data do DOU/Agência Senado |
 | Autor errado | bloqueio de 2022 foi do governo Jair, não do Flávio | Ponte só se estiver no documento |
 | Promessa vs constatação | plano Lula fala em "continuidade do uso estratégico do FNDCT", não "sem contingenciamento" | Prometido = palavras do plano |
+| Intenção atribuída sem texto | "o Flávio quer acabar com o piso" — "piso" aparece 0 vezes no plano | Ausência ≠ intenção: mostre "0 menções", nunca "quer acabar" |
+| O antecessor fez o contrário | governo Jair deu reajuste de 33,24% no piso (jan/2022) | Antes de "já vimos esse filme", procure o fato que desmente |
+| Zero falso por quebra de linha | termo hifenizado entre linhas some no grep | `grep-doc.sh` também conta no texto colado; os dois têm que bater |
 | Definição ampliada | "o FNDCT paga bolsa e startup" — sem fonte | Use a definição da lei (Lei 11.540/2007, art. 1º) |
 
 ## Checagem adversarial

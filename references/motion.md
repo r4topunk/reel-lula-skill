@@ -38,6 +38,7 @@ window.MOTION = {
 - Motion blur por média de subframes gera fantasma: use corte seco no beat.
 - WebGL + `file://` bloqueia textura: o renderer serve por http.
 - Dois renders ao mesmo tempo no notebook: os dois ficam lentos e um pode travar.
+- O renderer espera `MOTION.ready` antes do primeiro `seek(t)`; ponha no `ready` tudo que precisa carregar (fontes, WAVs). Algo carregado fora dele pode redesenhar o frame 0 por cima do still.
 - Contagem animada de número: o último frame da contagem tem que ser exatamente o valor do `facts.md`.
 - Loop ao vivo: agende o próximo buffer de áudio em `t0 + duração` para não abrir um buraco.
 
